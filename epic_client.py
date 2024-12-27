@@ -1,184 +1,218 @@
 import requests
-import urllib.parse
+import json
+import uuid
 import webbrowser
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import threading
-import uuid
-import json
-import hashlib
 import base64
+import hashlib
 import os
+import urllib.parse
+from datetime import datetime
 
 
-class EpicClient:
+class CallbackHandler(BaseHTTPRequestHandler):
+    code = None
+
+    def do_GET(self):
+        if '/callback' in self.path:
+            params = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            CallbackHandler.code = params.get('code', [None])[0]
+
+            self.send_response(200)
+            self.send_header('Content-type', 'text/html')
+            self.end_headers()
+            self.wfile.write(b"Authorization code received. You can close this window.")
+
+            # Stop the server after receiving the code
+            threading.Thread(target=self.server.shutdown).start()
+
+
+class EpicSandboxClient:
     def __init__(self):
-        self.client_id = "8d752ddc-7100-4d9d-9bf9-f1e2846afe5e"
-        self.redirect_uri = "http://localhost:8000"
-        self.base_url = "https://fhir.epic.com/interconnect-fhir-oauth"
-        self.fhir_base = f"{self.base_url}/api/FHIR/R4"
+        self.base_url = "https://fhir.epic.com/interconnect-fhir-oauth/api/FHIR/R4"
+        self.auth_base_url = "https://fhir.epic.com/interconnect-fhir-oauth/oauth2"
+        self.client_id = "4bbe2c64-79c6-47fc-a322-23ee11cc5811"  # Replace with your client ID
+        self.redirect_uri = "http://localhost:3000/callback"
+        self.scope = "launch/patient Patient.read"
 
     def generate_pkce_pair(self):
         """Generate PKCE code verifier and challenge"""
         code_verifier = base64.urlsafe_b64encode(os.urandom(40)).decode('utf-8')
-        code_verifier = code_verifier.replace('=', '')  # Remove padding
-        
-        # Generate S256 challenge
+        code_verifier = code_verifier.replace('=', '')
+
         code_challenge = hashlib.sha256(code_verifier.encode('utf-8')).digest()
         code_challenge = base64.urlsafe_b64encode(code_challenge).decode('utf-8')
-        code_challenge = code_challenge.replace('=', '')  # Remove padding
-        
+        code_challenge = code_challenge.replace('=', '')
+
         return code_verifier, code_challenge
 
-    def get_metadata(self, iss=None):
-        """Step 2: Get authorization endpoints from metadata or SMART configuration"""
-        # Use provided ISS or default base URL
-        base_endpoint = iss if iss else self.base_url
-        
-        # Try SMART configuration first (newer versions)
-        smart_config_url = f"{base_endpoint}/api/FHIR/R4/.well-known/smart-configuration"
-        headers = {
-            'Accept': 'application/json',
-            'Epic-Client-ID': self.client_id
-        }
-        
-        print(f"\nTrying SMART configuration endpoint: {smart_config_url}")
-        try:
-            response = requests.get(smart_config_url, headers=headers)
-            if response.status_code == 200:
-                config = response.json()
-                return {
-                    'authorize_endpoint': config.get('authorization_endpoint'),
-                    'token_endpoint': config.get('token_endpoint')
-                }
-        except Exception as e:
-            print(f"SMART configuration request failed: {e}")
-        
-        # Fallback to metadata endpoint
-        metadata_url = f"{base_endpoint}/api/FHIR/R4/metadata"
-        headers = {
-            'Accept': 'application/fhir+json',
-            'Epic-Client-ID': self.client_id
-        }
-        
-        print(f"\nTrying metadata endpoint: {metadata_url}")
-        try:
-            response = requests.get(metadata_url, headers=headers)
-            if response.status_code == 200:
-                metadata = response.json()
-                endpoints = {}
-                
-                # Extract OAuth URLs from metadata
-                for ext in metadata.get('extension', []):
-                    if ext.get('url') == 'http://fhir-registry.smarthealthit.org/StructureDefinition/oauth-uris':
-                        for uri in ext.get('extension', []):
-                            if uri.get('url') == 'authorize':
-                                endpoints['authorize_endpoint'] = uri.get('valueUri')
-                            elif uri.get('url') == 'token':
-                                endpoints['token_endpoint'] = uri.get('valueUri')
-                
-                if endpoints:
-                    return endpoints
-        except Exception as e:
-            print(f"Metadata request failed: {e}")
-        
-        # Fallback to default endpoints
-        return {
-            'authorize_endpoint': f"{self.base_url}/oauth2/authorize",
-            'token_endpoint': f"{self.base_url}/oauth2/token"
-        }
-
-    def authorize(self, launch=None, iss=None, use_post=True):
-        """Step 3: Request authorization code using POST or GET"""
-        # Get endpoints from metadata
-        endpoints = self.get_metadata(iss)
-        authorize_endpoint = endpoints.get('authorize_endpoint')
-        
-        # Generate state and PKCE values
-        state = str(uuid.uuid4())  # Random state with sufficient entropy
+    def get_auth_code(self):
+        """Start authorization flow and get auth code"""
+        state = str(uuid.uuid4())
         code_verifier, code_challenge = self.generate_pkce_pair()
-        
-        # Store code_verifier for token exchange
-        self.code_verifier = code_verifier
-        
-        # Construct authorization parameters
+
+        # Create authorization URL
         auth_params = {
             'response_type': 'code',
             'client_id': self.client_id,
             'redirect_uri': self.redirect_uri,
+            'scope': self.scope,
             'state': state,
-            'scope': 'launch openid fhirUser patient/*.read',  # Added OpenID scopes
             'code_challenge': code_challenge,
             'code_challenge_method': 'S256'
         }
-        
-        # Add launch parameter if provided (EHR launch flow)
-        if launch:
-            auth_params['launch'] = launch
-            
-        # Add aud parameter if iss provided (required from May 2023)
-        if iss:
-            auth_params['aud'] = iss
-        
-        if use_post:
-            # Create an HTML form for POST submission
-            html_form = f"""
-            <html>
-            <body onload="document.forms[0].submit()">
-                <form method="post" action="{authorize_endpoint}">
-                    {''.join(f'<input type="hidden" name="{k}" value="{v}">' for k, v in auth_params.items())}
-                </form>
-            </body>
-            </html>
-            """
-            
-            # Save the form to a temporary file and open it
-            with open('auth_form.html', 'w') as f:
-                f.write(html_form)
-            webbrowser.open('file://' + os.path.abspath('auth_form.html'))
-        else:
-            # Use GET request
-            auth_url = f"{authorize_endpoint}?{urllib.parse.urlencode(auth_params)}"
-            webbrowser.open(auth_url)
-        
-        print("\nAuthorization Request Details:")
-        print(f"Endpoint: {authorize_endpoint}")
-        print("Parameters:")
-        for k, v in auth_params.items():
-            print(f"  {k}: {v}")
-        
-        print("\nWaiting for authorization code from redirect...")
-        code = input("Enter the authorization code: ")
-        
-        # Clean up temporary file if it exists
-        if use_post and os.path.exists('auth_form.html'):
-            os.remove('auth_form.html')
-        
-        return code, state
 
-    def get_patient_data(self, access_token, patient_id):
-        """Step 6: Use FHIR APIs to access patient data"""
-        headers = {
-            'Authorization': f'Bearer {access_token}'
+        auth_url = f"{self.auth_base_url}/authorize?{urllib.parse.urlencode(auth_params)}"
+
+        # Start local server to receive callback
+        server = HTTPServer(('localhost', 3000), CallbackHandler)
+        server_thread = threading.Thread(target=server.serve_forever)
+        server_thread.daemon = True
+        server_thread.start()
+
+        # Open browser for authorization
+        webbrowser.open(auth_url)
+
+        # Wait for the callback
+        server.serve_forever()
+
+        return CallbackHandler.code, code_verifier
+
+    def get_token(self, auth_code, code_verifier):
+        """Exchange authorization code for access token"""
+        token_params = {
+            'grant_type': 'authorization_code',
+            'code': auth_code,
+            'redirect_uri': self.redirect_uri,
+            'client_id': self.client_id,
+            'code_verifier': code_verifier
         }
-        
+
+        response = requests.post(
+            f"{self.auth_base_url}/token",
+            data=token_params,
+            headers={'Content-Type': 'application/x-www-form-urlencoded'}
+        )
+
+        return response.json()
+
+    def refresh_token(self, refresh_token):
+        """Get new access token using refresh token"""
+        token_params = {
+            'grant_type': 'refresh_token',
+            'refresh_token': refresh_token,
+            'client_id': self.client_id
+        }
+
+        response = requests.post(
+            f"{self.auth_base_url}/token",
+            data=token_params,
+            headers={'Content-Type': 'application/x-www-form-urlencoded'}
+        )
+
+        return response.json()
+
+    def get_patient(self, access_token, patient_id=None):
+        """Get patient information"""
+        headers = {
+            'Authorization': f'Bearer {access_token}',
+            'Accept': 'application/json'
+        }
+
+        url = f"{self.base_url}/Patient/{patient_id}" if patient_id else f"{self.base_url}/Patient"
+        response = requests.get(url, headers=headers)
+
+        return response.json()
+
+    def get_conditions(self, access_token, patient_id):
+        """Get patient conditions"""
+        headers = {
+            'Authorization': f'Bearer {access_token}',
+            'Accept': 'application/json'
+        }
+
         response = requests.get(
-            f"{self.fhir_base}/Patient/{patient_id}",
+            f"{self.base_url}/Condition?patient={patient_id}",
             headers=headers
         )
-        
+
+        return response.json()
+
+    def get_medications(self, access_token, patient_id):
+        """Get patient medications"""
+        headers = {
+            'Authorization': f'Bearer {access_token}',
+            'Accept': 'application/json'
+        }
+
+        response = requests.get(
+            f"{self.base_url}/MedicationRequest?patient={patient_id}",
+            headers=headers
+        )
+
+        return response.json()
+
+    def get_observations(self, access_token, patient_id):
+        """Get patient observations"""
+        headers = {
+            'Authorization': f'Bearer {access_token}',
+            'Accept': 'application/json'
+        }
+
+        response = requests.get(
+            f"{self.base_url}/Observation?patient={patient_id}",
+            headers=headers
+        )
+
         return response.json()
 
 
 def main():
-    client = EpicClient()
+    client = EpicSandboxClient()
 
-    print("Starting authorization flow...")
-    client.authorize()
+    print("Starting Epic FHIR Authorization Flow...")
+    auth_code, code_verifier = client.get_auth_code()
 
-    # After authorization, fetch patient data
-    # Replace 'example_patient_id' with an actual patient ID from your sandbox
-    patient_id = "example_patient_id"
-    client.fetch_patient_data(patient_id)
+    if auth_code:
+        print("\nGot authorization code. Getting access token...")
+        token_response = client.get_token(auth_code, code_verifier)
+
+        if 'access_token' in token_response:
+            access_token = token_response['access_token']
+            print("\nSuccessfully got access token!")
+
+            # Get patient ID if needed
+            patient_id = input("\nEnter patient ID (or press Enter to list all patients): ").strip()
+
+            try:
+                # Get patient information
+                print("\nFetching patient information...")
+                patient_data = client.get_patient(access_token, patient_id if patient_id else None)
+                print(f"Patient Data: {json.dumps(patient_data, indent=2)}")
+
+                if patient_id:
+                    # Get conditions
+                    print("\nFetching conditions...")
+                    conditions = client.get_conditions(access_token, patient_id)
+                    print(f"Conditions: {json.dumps(conditions, indent=2)}")
+
+                    # Get medications
+                    print("\nFetching medications...")
+                    medications = client.get_medications(access_token, patient_id)
+                    print(f"Medications: {json.dumps(medications, indent=2)}")
+
+                    # Get observations
+                    print("\nFetching observations...")
+                    observations = client.get_observations(access_token, patient_id)
+                    print(f"Observations: {json.dumps(observations, indent=2)}")
+
+            except Exception as e:
+                print(f"Error accessing FHIR resources: {e}")
+        else:
+            print("Error getting access token:", token_response)
+    else:
+        print("Failed to get authorization code")
 
 
 if __name__ == "__main__":
