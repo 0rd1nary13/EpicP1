@@ -1,4 +1,4 @@
-# src/epic_auth.py
+import traceback
 
 import requests
 import base64
@@ -19,7 +19,7 @@ app.secret_key = secrets.token_hex(32)
 # OAuth 2.0 Configuration for Epic's sandbox
 CONFIG = {
     'client_id': '4bbe2c64-79c6-47fc-a322-23ee11cc5811',
-    'redirect_uri': 'https://4aaa-67-168-56-39.ngrok-free.app/epic-sandbox/callback',
+    'redirect_uri': 'https://7b26-137-110-45-62.ngrok-free.app/epic-sandbox/callback',
     'epic_base_url': 'https://fhir.epic.com/interconnect-fhir-oauth',
     # Only requesting basic scopes for standalone launch
     'scope': 'openid fhirUser',
@@ -40,100 +40,77 @@ def generate_code_challenge(verifier):
 @app.route('/')
 def index():
     return f'''
-        <h1>Epic Patient Portal Login</h1>
+        <h1>Epic OAuth Test App</h1>
         <p>Current Configuration:</p>
-        <pre>
-        Client ID: {CONFIG['client_id']}
-        Redirect URI: {CONFIG['redirect_uri']}
-        Epic Base URL: {CONFIG['epic_base_url']}
-        Scope: {CONFIG['scope']}
-        </pre>
-        <a href="/login">Click here to login</a>
+        <pre>{json.dumps(CONFIG, indent=2)}</pre>
+        <p>Current Session:</p>
+        <pre>{json.dumps({k: v for k, v in session.items()}, indent=2)}</pre>
+        <a href="/login">Start Login Process</a>
     '''
 
 
 @app.route('/login')
 def login():
     try:
-        # Generate PKCE code verifier and challenge
+        print("\n========== LOGIN ATTEMPT ==========")
         code_verifier = generate_code_verifier()
         code_challenge = generate_code_challenge(code_verifier)
         session['code_verifier'] = code_verifier
 
-        # Prepare authorization parameters for standalone launch
+        # Fix the redirect_uri - remove any spaces
+        redirect_uri = CONFIG['redirect_uri'].strip()
+
         auth_params = {
             'response_type': 'code',
             'client_id': CONFIG['client_id'],
-            'redirect_uri': CONFIG['redirect_uri'],
+            'redirect_uri': redirect_uri,  # Use the cleaned redirect_uri
             'scope': CONFIG['scope'],
             'state': secrets.token_hex(16),
             'code_challenge': code_challenge,
             'code_challenge_method': 'S256',
-            'aud': 'https://fhir.epic.com/interconnect-fhir-oauth/api/FHIR/R4'  # Only if needed
+            'aud': CONFIG['fhir_api_base']
         }
 
         session['oauth_state'] = auth_params['state']
-
-        # Build authorization URL
         auth_url = f"{CONFIG['epic_base_url']}/oauth2/authorize?{urlencode(auth_params)}"
 
-        print(f"Auth URL: {auth_url}")  # Debug print
+        print("Authorization URL:", auth_url)
         return redirect(auth_url)
     except Exception as e:
         print(f"Login error: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        return f"Error during login: {str(e)}", 500
 
+@app.before_request
+def log_request():
+    print("\n========== REQUEST RECEIVED ==========")
+    print(f"Path: {request.path}")
+    print(f"Method: {request.method}")
+    print(f"URL: {request.url}")
+    print(f"Headers: {dict(request.headers)}")
+    if request.args:
+        print(f"Query Parameters: {dict(request.args)}")
 
 @app.route('/epic-sandbox/callback')
 def callback():
+    print("\n========== CALLBACK RECEIVED ==========")
+    print(f"Full Callback URL: {request.url}")
+    print("\nQuery Parameters:")
+    for key, value in request.args.items():
+        print(f"{key}: {value}")
+
     try:
-        print("Callback args:", request.args)
-
-        error = request.args.get('error')
-        if error:
-            return f'Error: {error}<br>Description: {request.args.get("error_description")}'
-
-        if request.args.get('state') != session.get('oauth_state'):
-            return 'Invalid state parameter', 400
-
         code = request.args.get('code')
-        if not code:
-            return 'No authorization code received', 400
+        if code:
+            print("\nAuthorization Code Received:")
+            print("=" * 50)
+            print(code)
+            print("=" * 50)
 
-        token_params = {
-            'grant_type': 'authorization_code',
-            'code': code,
-            'redirect_uri': CONFIG['redirect_uri'],
-            'client_id': CONFIG['client_id'],
-            'code_verifier': session.get('code_verifier')
-        }
+        # Continue with your existing code...
 
-        token_url = f"{CONFIG['epic_base_url']}/oauth2/token"
-
-        print(f"Token request to: {token_url}")
-        print(f"Token params: {token_params}")
-
-        token_response = requests.post(
-            token_url,
-            data=token_params,
-            verify=False
-        )
-
-        print(f"Token response: {token_response.status_code} - {token_response.text}")
-
-        if token_response.status_code != 200:
-            return f'Token exchange failed: {token_response.text}', 400
-
-        tokens = token_response.json()
-        session['access_token'] = tokens['access_token']
-        if 'refresh_token' in tokens:
-            session['refresh_token'] = tokens['refresh_token']
-
-        return redirect('/patient-info')
     except Exception as e:
         print(f"Callback error: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
+        return f"Error in callback: {str(e)}", 500
 
 @app.route('/patient-info')
 def patient_info():
@@ -146,18 +123,34 @@ def patient_info():
             'Accept': 'application/json'
         }
 
-        patient_url = f"{CONFIG['fhir_api_base']}/Patient/me"
+        # If we have a specific patient ID, use it
+        patient_id = session.get('patient', 'me')
+        patient_url = f"{CONFIG['fhir_api_base']}/Patient/{patient_id}"
+
+        print("\n========== PATIENT INFO REQUEST ==========")
+        print(f"URL: {patient_url}")
+        print(f"Headers: {headers}")
+
         response = requests.get(
             patient_url,
             headers=headers,
-            verify=False
+            verify=False  # Only for development
         )
+
+        print("\n========== PATIENT INFO RESPONSE ==========")
+        print(f"Status: {response.status_code}")
+        print(f"Response: {response.text}")
 
         if response.status_code == 200:
             patient_data = response.json()
             return f'''
                 <h1>Patient Information</h1>
                 <pre>{json.dumps(patient_data, indent=2)}</pre>
+                <hr>
+                <h2>Access Token Information</h2>
+                <p>Token Type: {session.get('token_type')}</p>
+                <p>Expires In: {session.get('expires_in')} seconds</p>
+                <p>Scope: {session.get('scope')}</p>
                 <a href="/logout">Logout</a>
             '''
         else:
@@ -173,7 +166,17 @@ def logout():
 
 
 if __name__ == '__main__':
+    import logging
+
+    logging.basicConfig(level=logging.DEBUG)
+
     app.config['PROPAGATE_EXCEPTIONS'] = True
-    print("Starting server with configuration:")
-    print(json.dumps(CONFIG, indent=2))
-    app.run(port=3000, debug=True)
+    app.config['SERVER_NAME'] = None
+
+    print("\n========== SERVER STARTING ==========")
+    print("CONFIG:", json.dumps(CONFIG, indent=2))
+    print("\nRoutes registered:")
+    for rule in app.url_map.iter_rules():
+        print(f"- {rule}")
+
+    app.run(host='0.0.0.0', port=5000, debug=True)
