@@ -6,22 +6,18 @@ from urllib.parse import urlencode
 import requests
 import urllib3
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse
 from starlette.middleware.sessions import SessionMiddleware
 
-# Disable SSL warnings
 urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 app = FastAPI()
-
-# Add session middleware
 app.add_middleware(
     SessionMiddleware,
     secret_key=secrets.token_hex(32),
     session_cookie="epic_session"
 )
 
-# OAuth 2.0 Configuration for Epic's sandbox
 CONFIG = {
     'client_id': '4bbe2c64-79c6-47fc-a322-23ee11cc5811',
     'redirect_uri': 'https://7b26-137-110-45-62.ngrok-free.app/epic-sandbox/callback',
@@ -30,16 +26,13 @@ CONFIG = {
     'fhir_api_base': 'https://fhir.epic.com/interconnect-fhir-oauth/api/FHIR/R4'
 }
 
-
 def generate_code_verifier():
     token = secrets.token_urlsafe(64)
     return token[:128]
 
-
 def generate_code_challenge(verifier):
     sha256 = hashlib.sha256(verifier.encode('utf-8')).digest()
     return base64.urlsafe_b64encode(sha256).decode('utf-8').rstrip('=')
-
 
 @app.get("/", response_class=HTMLResponse)
 async def manual_token_page(request: Request):
@@ -68,71 +61,55 @@ async def manual_token_page(request: Request):
                 body {{ padding: 20px; font-family: Arial, sans-serif; }}
                 textarea {{ width: 100%; height: 150px; margin: 10px 0; }}
                 button {{ padding: 10px 20px; margin: 5px; }}
-                input {{ padding: 5px; margin: 5px; width: 300px; }}
+                input, select {{ padding: 8px; margin: 5px; }}
                 pre {{ margin-top: 20px; white-space: pre-wrap; background: #f5f5f5; padding: 10px; }}
-                .error {{ color: #721c24; background: #f8d7da; border: 1px solid #f5c6cb; padding: 10px; margin: 10px 0; }}
-                .debug-info {{ background: #eee; padding: 10px; margin: 10px 0; }}
-                .section {{ 
-                    margin-top: 30px; 
-                    border-top: 1px solid #ccc; 
-                    padding-top: 20px; 
-                }}
+                .section {{ margin-top: 30px; padding-top: 20px; }}
+                .error {{ color: #721c24; background-color: #f8d7da; padding: 10px; margin: 10px 0; border-radius: 4px; }}
+                .success {{ color: #155724; background-color: #d4edda; padding: 10px; margin: 10px 0; border-radius: 4px; }}
+                .tabs {{ margin-bottom: 20px; }}
+                .tab-content {{ padding: 20px; border: 1px solid #ddd; border-radius: 4px; }}
+                .search-form {{ display: grid; gap: 15px; max-width: 600px; }}
+                .form-group {{ display: grid; grid-template-columns: 150px 1fr; align-items: center; gap: 10px; }}
             </style>
             <script>
                 const CODE_VERIFIER = '{code_verifier}';
                 const AUTH_URL = '{auth_url}';
-                const EXAMPLE_APPOINTMENT_ID = 'elmPBHPxEEEvVLKSSR6xGfQaaeOxoGVxtCt9FlmcwgQ03';
+                const EXAMPLE_PATIENT_ID = 'eNO3wqOfAltfnWMfWBQ1WmQ3';
 
-                async function startAuth() {{
+                function startAuth() {{
                     window.open(AUTH_URL, '_blank');
                 }}
 
                 async function submitURL() {{
                     const url = document.getElementById('urlInput').value;
-                    try {{
-                        const response = await fetch('/process-callback-url', {{
-                            method: 'POST',
-                            headers: {{ 'Content-Type': 'application/json' }},
-                            body: JSON.stringify({{ 
-                                url: url,
-                                code_verifier: CODE_VERIFIER
-                            }})
-                        }});
-                        const data = await response.json();
-                        document.getElementById('result').textContent = JSON.stringify(data, null, 2);
-                    }} catch (error) {{
-                        document.getElementById('result').textContent = 'Error: ' + error.message;
-                    }}
+                    const response = await fetch('/process-callback-url', {{
+                        method: 'POST',
+                        headers: {{ 'Content-Type': 'application/json' }},
+                        body: JSON.stringify({{ url, code_verifier: CODE_VERIFIER }})
+                    }});
+                    const data = await response.json();
+                    document.getElementById('tokenResult').textContent = JSON.stringify(data, null, 2);
                 }}
 
-                async function fetchAppointment() {{
-                    const appointmentId = document.getElementById('appointmentId').value || EXAMPLE_APPOINTMENT_ID;
-                    try {{
-                        const response = await fetch(`/api/fhir/Appointment/${{appointmentId}}`);
-                        const data = await response.json();
+                async function searchAppointments() {{
+                    const params = new URLSearchParams();
+                    const date = document.getElementById('searchDate').value;
+                    const patient = document.getElementById('searchPatient').value;
+                    const status = document.getElementById('searchStatus').value;
+                    const category = document.getElementById('searchCategory').value;
 
-                        let formattedResult = '';
-                        if (data.status === 'error') {{
-                            formattedResult = `ERROR DETAILS:
--------------
-Code: ${{data.error_code}}
-Severity: ${{data.severity}}
-Message: ${{data.message}}
+                    if (date) params.append('date', date);
+                    if (patient) params.append('patient', patient);
+                    if (status) params.append('status', status);
+                    if (category) params.append('service-category', category);
 
-Full Response:
-${{JSON.stringify(data, null, 2)}}`;
-                        }} else {{
-                            formattedResult = JSON.stringify(data, null, 2);
-                        }}
-
-                        document.getElementById('appointmentResult').textContent = formattedResult;
-                    }} catch (error) {{
-                        document.getElementById('appointmentResult').textContent = 'Error: ' + error.message;
-                    }}
+                    const response = await fetch(`/api/fhir/r4/Appointment?${{params.toString()}}`);
+                    const data = await response.json();
+                    document.getElementById('appointmentResults').textContent = JSON.stringify(data, null, 2);
                 }}
 
-                function useExampleId() {{
-                    document.getElementById('appointmentId').value = EXAMPLE_APPOINTMENT_ID;
+                function useExamplePatientId() {{
+                    document.getElementById('searchPatient').value = EXAMPLE_PATIENT_ID;
                 }}
             </script>
         </head>
@@ -143,7 +120,6 @@ ${{JSON.stringify(data, null, 2)}}`;
                 <h3>Step 1: Start Authorization</h3>
                 <button onclick="startAuth()">Start Authorization</button>
                 <div class="debug-info">
-                    <p>Debug Information:</p>
                     <pre>Code Verifier: {code_verifier}</pre>
                     <pre>Code Challenge: {code_challenge}</pre>
                     <pre>State: {state}</pre>
@@ -152,32 +128,44 @@ ${{JSON.stringify(data, null, 2)}}`;
 
             <div class="section">
                 <h3>Step 2: Enter Callback URL</h3>
-                <p>After authorizing, paste the callback URL here:</p>
                 <textarea id="urlInput" placeholder="Paste the callback URL here"></textarea>
                 <button onclick="submitURL()">Process URL</button>
-                <h4>Token Exchange Results:</h4>
-                <pre id="result"></pre>
+                <pre id="tokenResult"></pre>
             </div>
 
             <div class="section">
-                <h3>Step 3: Test Appointment API</h3>
-                <p>After getting the token, test the Appointment API:</p>
-                <div class="input-group">
-                    <input type="text" id="appointmentId" 
-                           placeholder="Enter Appointment ID">
-                    <button onclick="useExampleId()">Use Example ID</button>
-                    <button onclick="fetchAppointment()">Fetch Appointment</button>
+                <h3>Step 3: Search Appointments</h3>
+                <div class="search-form">
+                    <div class="form-group">
+                        <label>Date:</label>
+                        <input type="date" id="searchDate">
+                    </div>
+                    <div class="form-group">
+                        <label>Patient ID:</label>
+                        <input type="text" id="searchPatient" placeholder="Patient reference">
+                        <button onclick="useExamplePatientId()">Use Example ID</button>
+                    </div>
+                    <div class="form-group">
+                        <label>Status:</label>
+                        <select id="searchStatus">
+                            <option value="">Any</option>
+                            <option value="booked">Booked</option>
+                            <option value="pending">Pending</option>
+                            <option value="arrived">Arrived</option>
+                            <option value="cancelled">Cancelled</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label>Service Category:</label>
+                        <input type="text" id="searchCategory" value="appointment">
+                    </div>
+                    <button onclick="searchAppointments()">Search Appointments</button>
                 </div>
-                <p style="color: #666; font-size: 0.9em;">
-                    Example ID: elmPBHPxEEEvVLKSSR6xGfQaaeOxoGVxtCt9FlmcwgQ03
-                </p>
-                <h4>Appointment API Response:</h4>
-                <pre id="appointmentResult"></pre>
+                <pre id="appointmentResults"></pre>
             </div>
         </body>
     </html>
     """
-
 
 @app.post("/process-callback-url")
 async def process_callback_url(request: Request):
@@ -186,16 +174,10 @@ async def process_callback_url(request: Request):
         url = data.get('url')
         code_verifier = data.get('code_verifier')
 
-        if not url or not code_verifier:
-            raise HTTPException(status_code=400, detail="Missing URL or code_verifier")
-
         from urllib.parse import urlparse, parse_qs
         parsed_url = urlparse(url)
         params = parse_qs(parsed_url.query)
-
         code = params.get('code', [None])[0]
-        if not code:
-            raise HTTPException(status_code=400, detail="No authorization code found in URL")
 
         token_params = {
             'grant_type': 'authorization_code',
@@ -205,133 +187,78 @@ async def process_callback_url(request: Request):
             'code_verifier': code_verifier
         }
 
-        headers = {
-            'Content-Type': 'application/x-www-form-urlencoded'
-        }
-
         token_response = requests.post(
             f"{CONFIG['epic_base_url']}/oauth2/token",
             data=token_params,
-            headers=headers,
+            headers={'Content-Type': 'application/x-www-form-urlencoded'},
             verify=False
         )
 
         if token_response.status_code == 200:
             token_data = token_response.json()
             request.session['access_token'] = token_data.get('access_token')
-            return {
-                "status": "success",
-                "token_data": token_data
-            }
-        else:
-            return {
-                "status": "error",
-                "message": f"Failed to get access token: {token_response.text}",
-                "request_details": {
-                    "params": token_params,
-                    "headers": headers
-                }
-            }
+            return {"status": "success", "token_data": token_data}
+        return {"status": "error", "message": f"Failed to get access token: {token_response.text}"}
 
     except Exception as e:
-        print(f"Error processing URL: {str(e)}")
-        return {
-            "status": "error",
-            "message": str(e)
-        }
+        return {"status": "error", "message": str(e)}
 
-
-@app.get("/api/fhir/{resource_type}/{resource_id}")
-async def get_fhir_resource(request: Request, resource_type: str, resource_id: str):
+@app.get("/api/fhir/r4/Appointment")
+async def search_appointments(
+    request: Request,
+    date: str = None,
+    identifier: str = None,
+    patient: str = None,
+    status: str = None,
+    service_category: str = None
+):
     try:
         access_token = request.session.get('access_token')
         if not access_token:
             return {
                 "status": "error",
                 "error_code": "4118",
-                "severity": "Fatal",
-                "message": "User not authorized for request: No access token found"
+                "message": "User not authorized: No access token found"
             }
+
+        params = {}
+        if date: params['date'] = date
+        if identifier: params['identifier'] = identifier
+        if patient: params['patient'] = patient
+        if status: params['status'] = status
+        if service_category: params['service-category'] = service_category
 
         headers = {
             'Authorization': f'Bearer {access_token}',
-            'Accept': 'application/json'
+            'Accept': 'application/fhir+json'
         }
 
-        fhir_url = f"{CONFIG['fhir_api_base']}/{resource_type}/{resource_id}"
-
-        print("\n========== FHIR API REQUEST ==========")
-        print(f"URL: {fhir_url}")
-        print(f"Headers: {headers}")
-
         response = requests.get(
-            fhir_url,
+            f"{CONFIG['fhir_api_base']}/Appointment",
+            params=params,
             headers=headers,
             verify=False
         )
 
-        print("\n========== FHIR API RESPONSE ==========")
-        print(f"Status Code: {response.status_code}")
-        print(f"Response: {response.text}")
-
         if response.status_code == 200:
-            return {
-                "status": "success",
-                "data": response.json()
-            }
-        elif response.status_code == 404:
-            return {
-                "status": "error",
-                "error_code": "4102",
-                "severity": "Fatal",
-                "message": f"The read resource request contained an invalid ID: {resource_type}/{resource_id}"
-            }
-        elif response.status_code == 401:
-            return {
-                "status": "error",
-                "error_code": "4118",
-                "severity": "Fatal",
-                "message": "User not authorized for request"
-            }
-        elif response.status_code == 403:
-            return {
-                "status": "error",
-                "error_code": "4130",
-                "severity": "Fatal",
-                "message": "Break-the-Glass security does not authorize you to access the selected resource"
-            }
+            return {"status": "success", "data": response.json()}
         else:
             try:
-                error_response = response.json()
-                return {
-                    "status": "error",
-                    "error_code": error_response.get('resourceType', 'Unknown'),
-                    "severity": "Fatal",
-                    "message": f"Failed to fetch {resource_type} data: {error_response}",
-                    "raw_response": error_response
-                }
+                error_data = response.json()
+                if "issue" in error_data:
+                    issue = error_data["issue"][0]
+                    return {
+                        "status": "error",
+                        "error_code": issue.get("code", str(response.status_code)),
+                        "message": issue.get("details", {}).get("text", response.text)
+                    }
             except:
-                return {
-                    "status": "error",
-                    "error_code": "59177",
-                    "severity": "Fatal",
-                    "message": f"An unexpected error occurred: Status {response.status_code}",
-                    "raw_response": response.text
-                }
+                pass
+            return {"status": "error", "message": f"Failed to search appointments: {response.text}"}
 
     except Exception as e:
-        print(f"Error fetching {resource_type} data: {str(e)}")
-        return {
-            "status": "error",
-            "error_code": "59177",
-            "severity": "Fatal",
-            "message": f"An unexpected internal error has occurred: {str(e)}"
-        }
-
+        return {"status": "error", "message": f"An unexpected error occurred: {str(e)}"}
 
 if __name__ == "__main__":
     import uvicorn
-
-    print("\n========== SERVER STARTING ==========")
-    print("CONFIG:", json.dumps(CONFIG, indent=2))
     uvicorn.run(app, host="0.0.0.0", port=3000)
